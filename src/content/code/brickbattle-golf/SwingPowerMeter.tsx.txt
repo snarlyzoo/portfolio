@@ -1,0 +1,131 @@
+import { useMotion } from "@rbxts/pretty-react-hooks";
+import React, { useEffect } from "@rbxts/react";
+import { useAtom } from "@rbxts/react-charm";
+import { GolfClubAtoms } from "client/atoms";
+import { WhiteCircle } from "client/ui/assets";
+import { useTerrainColorSequence } from "client/ui/hooks";
+
+interface TerrainStripProps {
+	ZIndex?: number;
+}
+
+const TerrainStrip = ({ ZIndex }: TerrainStripProps): React.Element => {
+	const [color, transparency] = useTerrainColorSequence();
+	return (
+		<frame BackgroundColor3={new Color3(1, 1, 1)} BorderSizePixel={0} Size={UDim2.fromScale(1, 1)} ZIndex={ZIndex}>
+			<uigradient Color={color} Rotation={-90} Transparency={transparency} />
+		</frame>
+	);
+};
+
+const METER_TICK_MARKS = [0.25, 0.5, 0.75];
+
+interface SwingPowerMeterProps {
+	AnchorPoint?: Vector2;
+	Position?: UDim2;
+	Size?: UDim2;
+}
+
+const SwingPowerMeter = ({ AnchorPoint, Position, Size }: SwingPowerMeterProps): React.Element => {
+	const swingPower = useAtom(GolfClubAtoms.swingPower);
+	const isBallInRange = useAtom(GolfClubAtoms.isBallInRange);
+	const isOvercharging = useAtom(GolfClubAtoms.isOvercharging);
+
+	const [rotationBinding, rotationMotion] = useMotion(0);
+	const [scaleBinding, scaleMotion] = useMotion(1);
+
+	useEffect(() => {
+		if (isOvercharging) {
+			rotationMotion.set(2.5);
+			rotationMotion.tween(-2.5, {
+				time: 0.05,
+				style: Enum.EasingStyle.Quad,
+				direction: Enum.EasingDirection.Out,
+				repeatCount: math.huge,
+				reverses: true,
+			});
+
+			scaleMotion.set(1.05);
+			scaleMotion.tween(1, { time: 0.05, style: Enum.EasingStyle.Quad, direction: Enum.EasingDirection.Out });
+		}
+	}, [isOvercharging]);
+
+	return (
+		<frame
+			AnchorPoint={AnchorPoint}
+			BackgroundColor3={new Color3(0, 0, 0)}
+			BackgroundTransparency={0.66}
+			BorderSizePixel={0}
+			Position={Position}
+			Rotation={rotationBinding}
+			Size={Size}
+		>
+			{isBallInRange && swingPower < 1 && <TerrainStrip ZIndex={0} />}
+
+			<frame
+				AnchorPoint={new Vector2(0, 1)}
+				BackgroundColor={new BrickColor(isOvercharging ? "Pastel orange" : "Medium green")}
+				BorderSizePixel={0}
+				Position={UDim2.fromScale(0, 1)}
+				Size={UDim2.fromScale(1, math.clamp(swingPower, 0, 1))}
+			/>
+
+			{isOvercharging && (
+				<frame
+					AnchorPoint={new Vector2(0, 1)}
+					BackgroundColor={new BrickColor("Bright red")}
+					BorderSizePixel={0}
+					Position={UDim2.fromScale(0, 0)}
+					Size={UDim2.fromScale(1, swingPower - 1)}
+				/>
+			)}
+
+			<frame
+				BackgroundTransparency={1}
+				Position={UDim2.fromScale(0, math.clamp(1 - swingPower, 0, 1))}
+				Size={UDim2.fromScale(1, 0.1)}
+			>
+				<frame
+					AnchorPoint={new Vector2(1, 1)}
+					Position={UDim2.fromScale(-0.33, 0)}
+					Size={UDim2.fromScale(2, 1)}
+					BackgroundColor3={new Color3(0, 0, 0)}
+					BackgroundTransparency={0.66}
+					BorderSizePixel={0}
+				>
+					<textlabel
+						AnchorPoint={new Vector2(0.5, 0.5)}
+						BackgroundTransparency={1}
+						Position={UDim2.fromScale(0.5, 0.5)}
+						Size={UDim2.fromScale(1, 0.66)}
+						Text={`${math.round(swingPower * 100)}%`}
+						TextColor3={new Color3(1, 1, 1)}
+						TextScaled={true}
+					/>
+					<uicorner CornerRadius={new UDim(0.33, 0)} />
+				</frame>
+				<frame BackgroundColor3={new Color3(1, 1, 1)} BorderSizePixel={0} Size={UDim2.fromScale(1, 0.1)} />
+			</frame>
+
+			{METER_TICK_MARKS.map((y) => (
+				<imagelabel
+					AnchorPoint={new Vector2(0.5, 0.5)}
+					BackgroundTransparency={1}
+					Position={UDim2.fromScale(0.5, y)}
+					Size={UDim2.fromScale(0.25, 0.025)}
+					Image={WhiteCircle}
+				/>
+			))}
+
+			<uiaspectratioconstraint
+				AspectRatio={0.1}
+				AspectType={Enum.AspectType.ScaleWithParentSize}
+				DominantAxis={Enum.DominantAxis.Height}
+			/>
+			<uiscale Scale={scaleBinding} />
+			<uistroke StrokeSizingMode={Enum.StrokeSizingMode.ScaledSize} Thickness={0.1} Transparency={0.33} />
+		</frame>
+	);
+};
+
+export default SwingPowerMeter;

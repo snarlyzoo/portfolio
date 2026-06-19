@@ -1,0 +1,81 @@
+import { StateMachineConfig } from "shared/constants/movement";
+import { MovementStateContext, MovementStateType } from "shared/types/movement";
+import {
+	CrouchedState,
+	CrouchFallState,
+	FreefallState,
+	JumpingState,
+	LandedState,
+	MovementState,
+	NoneState,
+	RunningState,
+	SlidingState,
+	WalkingState,
+	WallRunningState,
+} from "./states";
+import Signal from "@rbxts/signal";
+
+class MovementStateMachine {
+	readonly StateChanged = new Signal<(stateType: MovementStateType) => void>();
+
+	private readonly states: Record<MovementStateType, MovementState>;
+
+	private currentState: MovementState;
+
+	constructor(context: MovementStateContext) {
+		this.states = {
+			[MovementStateType.Crouched]: new CrouchedState(context),
+			[MovementStateType.CrouchFall]: new CrouchFallState(context),
+			[MovementStateType.Freefall]: new FreefallState(context),
+			[MovementStateType.Jumping]: new JumpingState(context),
+			[MovementStateType.Landed]: new LandedState(context),
+			[MovementStateType.None]: new NoneState(context),
+			[MovementStateType.Running]: new RunningState(context),
+			[MovementStateType.Sliding]: new SlidingState(context),
+			[MovementStateType.Walking]: new WalkingState(context),
+			[MovementStateType.WallRunning]: new WallRunningState(context),
+		};
+
+		this.currentState = this.states[MovementStateType.None];
+		task.defer(() => this.changeState(MovementStateType.Freefall));
+	}
+
+	update(deltaTime: number): void {
+		const stateType = this.currentState.update(deltaTime);
+		if (stateType) this.changeState(stateType);
+	}
+
+	changeState(stateType: MovementStateType, depth = 0): boolean {
+		if (stateType === this.currentState.stateType) return false;
+
+		if (depth === 0 && !this.currentState.exit(stateType)) return false;
+
+		if (depth > StateMachineConfig.STATE_CHANGE_WARNING_DEPTH) {
+			warn(`State change depth exceeded warning depth: ${depth}`);
+		}
+		if (depth > StateMachineConfig.MAX_STATE_CHANGE_DEPTH) {
+			warn(`Max state change depth exceeded: ${depth}`);
+			return false;
+		}
+
+		const state = this.states[stateType];
+		const newStateType = state.enter(this.currentState.stateType);
+		if (newStateType) return this.changeState(newStateType, depth + 1);
+
+		this.currentState = state;
+
+		this.StateChanged.Fire(state.stateType);
+
+		return true;
+	}
+
+	getMovementStateType(): MovementStateType {
+		return this.currentState.stateType;
+	}
+
+	destroy(): void {
+		this.currentState.exit(MovementStateType.None);
+	}
+}
+
+export default MovementStateMachine;

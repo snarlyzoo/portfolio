@@ -1,0 +1,80 @@
+import { Component } from "@flamework/components";
+import { OnStart } from "@flamework/core";
+import Object from "@rbxts/object-utils";
+import { Players } from "@rbxts/services";
+import LocalCharacterComponent from "client/components/LocalCharacterComponent";
+import CameraController from "client/controllers/CameraController";
+import CharacterController from "client/controllers/CharacterController";
+import InputController from "client/controllers/InputController";
+import DisposableComponent from "shared/components/DisposableComponent";
+import { ItemAnimations, ItemAttributes, ItemInstance, ItemType } from "shared/types";
+
+@Component({ predicate: (instance) => instance.Parent === Players.LocalPlayer.FindFirstChildOfClass("Backpack") })
+abstract class ItemComponent<
+		A extends ItemAttributes = ItemAttributes,
+		I extends ItemInstance = ItemInstance,
+		T extends ItemAnimations = ItemAnimations,
+	>
+	extends DisposableComponent<A, I>
+	implements OnStart
+{
+	abstract readonly itemType: ItemType;
+
+	constructor(protected characterController: CharacterController, protected inputController: InputController) {
+		super();
+	}
+
+	protected localCharacter!: LocalCharacterComponent;
+
+	protected isEquipped = false;
+	protected isActive = false;
+
+	protected animationTracks: Partial<Record<keyof T, AnimationTrack>> = {};
+
+	async onStart() {
+		this.localCharacter = await this.characterController.waitForLocalCharacter();
+
+		this.loadAnimations();
+		this.setupControls();
+	}
+
+	equip() {
+		this.isEquipped = true;
+
+		this.animationTracks.Idle?.Play();
+
+		this.inputController.enableItemContext();
+	}
+
+	unequip() {
+		this.isEquipped = false;
+
+		for (const track of Object.values(this.animationTracks) as AnimationTrack[]) track.Stop();
+
+		this.inputController.disableItemContext();
+	}
+
+	getIsActive() {
+		return this.isActive;
+	}
+
+	protected abstract primaryAction(toActivate: boolean): void;
+
+	protected secondaryAction(toActivate: boolean) {}
+
+	protected loadAnimations() {
+		for (const animation of this.instance.Animations.GetChildren() as Animation[])
+			this.animationTracks[animation.Name as keyof T] =
+				this.localCharacter.instance.Humanoid.Animator.LoadAnimation(animation);
+	}
+
+	protected setupControls() {
+		this.janitor.Add(this.inputController.Item.PrimaryActionPressed.Connect(() => this.primaryAction(true)));
+		this.janitor.Add(this.inputController.Item.PrimaryActionReleased.Connect(() => this.primaryAction(false)));
+
+		this.janitor.Add(this.inputController.Item.SecondaryActionPressed.Connect(() => this.secondaryAction(true)));
+		this.janitor.Add(this.inputController.Item.SecondaryActionReleased.Connect(() => this.secondaryAction(false)));
+	}
+}
+
+export default ItemComponent;

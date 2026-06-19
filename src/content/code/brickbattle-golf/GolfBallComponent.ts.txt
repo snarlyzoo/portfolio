@@ -1,0 +1,156 @@
+import { Component } from "@flamework/components";
+import { OnPhysics, OnStart } from "@flamework/core";
+import { Workspace } from "@rbxts/services";
+import { golfBallAtom } from "client/atoms";
+import { Events } from "client/network";
+import { GolfBallConfig, TerrainConfig } from "shared/constants";
+import { GolfBallInstance } from "shared/types";
+import { computeGolfBallVelocity, computeHomingLaunchAngle, getTerrainPhysics } from "shared/utils";
+import PhysicsObjectComponent from "./PhysicsObjectComponent";
+
+@Component({ tag: "GolfBall" })
+class GolfBallComponent extends PhysicsObjectComponent<GolfBallInstance> implements OnStart, OnPhysics {
+	private static readonly GROUND_CHECK_RAY = new Vector3(0, -GolfBallConfig.GROUND_CHECK_DISTANCE, 0);
+
+	private raycastParams = new RaycastParams();
+
+	private terrainPhysics = TerrainConfig.DEFAULT_PHYSICS;
+
+	private homingTarget: Model | undefined;
+	private homingStartTick = 0;
+
+	override async onStart() {
+		super.onStart();
+
+		this.raycastParams.FilterDescendantsInstances = [this.instance];
+		this.raycastParams.FilterType = Enum.RaycastFilterType.Exclude;
+
+		this.instance.RootPart.Touched.Connect((otherPart) => this.onTouched(otherPart));
+
+		golfBallAtom(this);
+		this.janitor.Add(() => {
+			if (golfBallAtom() === this) golfBallAtom(undefined);
+		});
+	}
+
+	onPhysics(): void {
+		const velocity = this.instance.RootPart.AssemblyLinearVelocity;
+		this.applyDrag(velocity);
+		this.updateHoming(velocity);
+	}
+
+	hit(swingDirection: Vector3, swingPower: number, swingAngle: number, targetCharacter?: Model) {
+		if (targetCharacter) {
+			this.homingTarget = targetCharacter;
+			this.homingStartTick = os.clock();
+
+			const toTarget = targetCharacter.GetPivot().Position.sub(this.instance.GetPivot().Position);
+			const distance = new Vector3(toTarget.X, 0, toTarget.Z).Magnitude;
+			swingAngle = computeHomingLaunchAngle(distance, swingPower);
+		}
+
+		const velocity = computeGolfBallVelocity(swingDirection, swingPower, swingAngle);
+		this.instance.RootPart.ApplyImpulse(velocity.mul(this.mass));
+	}
+
+	private applyDrag(velocity: Vector3) {
+		if (velocity.Magnitude < GolfBallConfig.MIN_ROLL_SPEED) {
+			this.instance.DragForce.Force = Vector3.zero;
+			this.instance.RootPart.AssemblyAngularVelocity = Vector3.zero;
+			this.instance.RootPart.AssemblyLinearVelocity = Vector3.zero;
+			return;
+		}
+
+		const velocityXZ = new Vector3(velocity.X, 0, velocity.Z);
+
+		const raycastResult = Workspace.Raycast(
+			this.instance.RootPart.Position,
+			GolfBallComponent.GROUND_CHECK_RAY,
+			this.raycastParams,
+		);
+		if (!raycastResult) {
+			this.terrainPhysics = TerrainConfig.DEFAULT_PHYSICS;
+			this.instance.DragForce.Force = velocityXZ.mul(-(this.mass * GolfBallConfig.AIR_DRAG_COEFFICIENT));
+			return;
+		}
+
+		const terrainPhysics = getTerrainPhysics(raycastResult);
+		if (terrainPhysics !== this.terrainPhysics && terrainPhysics.speedRetention < 1)
+			this.instance.RootPart.AssemblyLinearVelocity = velocity.mul(terrainPhysics.speedRetention);
+		this.terrainPhysics = terrainPhysics;
+
+		const speedXZ = velocityXZ.Magnitude;
+		if (speedXZ < 1e-6) {
+			this.instance.DragForce.Force = Vector3.zero;
+			return;
+		}
+
+		const quadraticDrag = speedXZ ** 2 * GolfBallConfig.DRAG_COEFFICIENT * terrainPhysics.dragMultiplier;
+		const linearDrag = speedXZ * GolfBallConfig.LINEAR_DAMPING * terrainPhysics.linearDampingMultiplier;
+		const dragMagnitude = (quadraticDrag + linearDrag) * this.mass;
+		this.instance.DragForce.Force = velocityXZ.Unit.mul(-dragMagnitude);
+	}
+
+	private updateHoming(velocity: Vector3) {
+		if (!this.homingTarget || velocity.Magnitude < GolfBallConfig.MIN_ROLL_SPEED) {
+			this.instance.HomingForce.Force = Vector3.zero;
+			return;
+		}
+
+		if (os.clock() - this.homingStartTick > GolfBallConfig.HOMING_DURATION) {
+			this.stopHoming();
+			return;
+		}
+
+		const toTarget = this.homingTarget.GetPivot().Position.sub(this.instance.GetPivot().Position);
+
+		const elapsed = os.clock() - this.homingStartTick;
+		const dot = toTarget.Unit.Dot(velocity.Unit);
+		if (elapsed > GolfBallConfig.HOMING_OVERSHOOT_GRACE && dot < 0) {
+			this.stopHoming();
+			return;
+		}
+
+		const steering = toTarget.Unit.sub(velocity.Unit);
+		const clampedSteering =
+			steering.Magnitude > GolfBallConfig.HOMING_MAX_TURN
+				? steering.Unit.mul(GolfBallConfig.HOMING_MAX_TURN)
+				: steering;
+		const steeringForce = clampedSteering.mul(GolfBallConfig.HOMING_STRENGTH);
+
+		const gravityForce = new Vector3(0, Workspace.Gravity, 0);
+		this.instance.HomingForce.Force = steeringForce.add(gravityForce).mul(this.mass);
+	}
+
+	private stopHoming() {
+		this.homingTarget = undefined;
+		this.instance.HomingForce.Force = Vector3.zero;
+	}
+
+	private onTouched(otherPart: BasePart) {
+		const velocity = this.instance.RootPart.AssemblyLinearVelocity;
+		if (velocity.Magnitude >= GolfBallConfig.MIN_KNOCKBACK_SPEED) {
+			const character = otherPart.Parent as Model | undefined;
+			const humanoid = character?.FindFirstChildOfClass("Humanoid");
+			if (character && humanoid) {
+				this.instance.RootPart.AssemblyLinearVelocity = Vector3.zero;
+				this.instance.RootPart.ApplyImpulse(new Vector3(0, 25, 0).mul(this.mass));
+
+				if (character.FindFirstChildOfClass("ForceField")) return;
+
+				Events.GolfBallKnockback(velocity, this.instance.GetPivot().Position, humanoid.Parent as Model);
+
+				if (humanoid.GetState() === Enum.HumanoidStateType.Ragdoll) return;
+
+				if (this.localCharacter) {
+					if (character === this.localCharacter.instance) return;
+					this.localCharacter.rush(GolfBallConfig.KNOCKOUT_RUSH_DURATION);
+				}
+			}
+		}
+
+		this.stopHoming();
+	}
+}
+
+export default GolfBallComponent;

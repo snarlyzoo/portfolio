@@ -1,0 +1,359 @@
+import { Component, Components } from "@flamework/components";
+import { OnTick } from "@flamework/core";
+import { subscribe } from "@rbxts/charm";
+import { KeyframeSequenceProvider, Workspace } from "@rbxts/services";
+import ShapecastHitbox, { Hitbox } from "@rbxts/shapecasthitbox";
+import { golfBallAtom, GolfClubAtoms, homingTargetAtom } from "client/atoms";
+import CameraController from "client/controllers/CameraController";
+import CharacterController from "client/controllers/CharacterController";
+import HomingController from "client/controllers/HomingController";
+import InputController from "client/controllers/InputController";
+import { Events } from "client/network";
+import { GolfClubConfig } from "shared/constants";
+import { GolfClubAnimations, GolfClubInstance, ItemAttributes, ItemType } from "shared/types";
+import { applyRandomYawSpread, computeSwingPower, findPoseInKeyframe } from "shared/utils";
+import ItemComponent from "./ItemComponent";
+
+enum GolfClubState {
+	Backswing,
+	Swing,
+	Aim,
+	None,
+}
+
+@Component({ tag: "GolfClub" })
+class GolfClubComponent extends ItemComponent<ItemAttributes, GolfClubInstance, GolfClubAnimations> implements OnTick {
+	readonly itemType = ItemType.GolfClub;
+
+	constructor(
+		characterController: CharacterController,
+		inputController: InputController,
+		private cameraController: CameraController,
+		private homingController: HomingController,
+	) {
+		super(characterController, inputController);
+	}
+
+	private state = GolfClubState.None;
+
+	private backswingStartTick = 0;
+	private lastSwingTick = 0;
+
+	private swingTargetOffset!: Vector3;
+
+	private meleeHitbox!: Hitbox;
+	private meleeTargetsHit = new Set<Model>();
+
+	override async onStart() {
+		await super.onStart();
+
+		this.setupIKControls();
+		this.setupMeleeHitbox();
+
+		this.janitor.Add(
+			subscribe(
+				() => GolfClubAtoms.isBallInRange() && GolfClubAtoms.isOvercharging(),
+				(shouldHome) => {
+					if (shouldHome) {
+						this.homingController.enable({
+							coneHalfAngle: GolfClubConfig.HOMING_CONE_HALF_ANGLE,
+							maxRange: GolfClubConfig.HOMING_CONE_MAX_RANGE,
+						});
+					} else {
+						this.homingController.disable();
+					}
+				},
+			),
+		);
+	}
+
+	onTick() {
+		if (!(this.state === GolfClubState.Backswing || this.state === GolfClubState.Aim)) return;
+
+		const cameraDirection = this.cameraController.getCamera().CFrame.LookVector;
+		const swingDirection = new Vector3(cameraDirection.X, 0, cameraDirection.Z).Unit;
+		GolfClubAtoms.swingDirection(swingDirection);
+
+		const golfBall = golfBallAtom();
+
+		let isBallInRange = false;
+		if (golfBall) {
+			const targetPos = this.localCharacter.instance.GetPivot().PointToWorldSpace(this.swingTargetOffset);
+			const swingPos = targetPos.add(swingDirection.mul(GolfClubConfig.BALL_HIT_FORWARD_OFFSET));
+			const golfBallPos = golfBall.instance.GetPivot().Position;
+			isBallInRange = swingPos.sub(golfBallPos).Magnitude <= GolfClubConfig.BALL_HIT_RADIUS;
+		}
+		GolfClubAtoms.isBallInRange(isBallInRange);
+
+		if (this.state === GolfClubState.Backswing) {
+			const swingPower = GolfClubAtoms.swingPower(computeSwingPower(os.clock() - this.backswingStartTick));
+			if (!GolfClubAtoms.isOvercharging() && swingPower > 1) {
+				GolfClubAtoms.isOvercharging(true);
+				this.animationTracks.Overcharge?.Play();
+			}
+		}
+	}
+
+	override equip() {
+		super.equip();
+
+		this.inputController.enableGolfClubContext();
+	}
+
+	override unequip() {
+		super.unequip();
+
+		this.inputController.disableGolfClubContext();
+	}
+
+	protected primaryAction(toActivate: boolean) {
+		if (!this.isEquipped) return;
+
+		this.backswing(toActivate);
+	}
+
+	protected override secondaryAction(toActivate: boolean) {
+		if (!this.isEquipped) return;
+
+		this.aim(toActivate);
+	}
+
+	protected override setupControls() {
+		super.setupControls();
+
+		this.janitor.Add(
+			this.inputController.GolfClub.AdjustSwingAngleStateChanged.Connect((value) => this.adjustSwingAngle(value)),
+		);
+
+		this.janitor.Add(
+			this.inputController.GolfClub.SwingAnglePreset1Pressed.Connect(() => this.setSwingAnglePreset(1)),
+		);
+		this.janitor.Add(
+			this.inputController.GolfClub.SwingAnglePreset2Pressed.Connect(() => this.setSwingAnglePreset(2)),
+		);
+		this.janitor.Add(
+			this.inputController.GolfClub.SwingAnglePreset3Pressed.Connect(() => this.setSwingAnglePreset(3)),
+		);
+		this.janitor.Add(
+			this.inputController.GolfClub.SwingAnglePreset4Pressed.Connect(() => this.setSwingAnglePreset(4)),
+		);
+	}
+
+	private backswing(toBackswing: boolean) {
+		if (toBackswing) {
+			if (!(this.state === GolfClubState.None || this.state === GolfClubState.Aim)) return;
+			if (os.clock() - this.lastSwingTick < GolfClubConfig.SWING_COOLDOWN) return;
+
+			this.backswingStartTick = os.clock();
+			GolfClubAtoms.isOvercharging(false);
+
+			this.localCharacter.setWalkSpeedMultiplier(GolfClubConfig.SWING_WALK_SPEED_MULTIPLIER);
+
+			this.changeState(GolfClubState.Backswing);
+
+			if (GolfClubAtoms.swingAngle() === 0) {
+				this.animationTracks?.BackswingPutt?.Play();
+			} else {
+				this.animationTracks?.BackswingFull?.Play();
+			}
+
+			Events.GolfClub.Backswing.fire(Workspace.GetServerTimeNow());
+		} else {
+			if (this.state !== GolfClubState.Backswing) return;
+
+			this.swing();
+		}
+	}
+
+	private swing() {
+		this.lastSwingTick = os.clock();
+
+		this.cameraController.lockAim();
+		this.localCharacter.setWalkSpeedMultiplier(0);
+		this.meleeHitbox.HitStart();
+
+		let swingDirection = GolfClubAtoms.swingDirection();
+		const swingPower = GolfClubAtoms.swingPower();
+		const swingAngle = GolfClubAtoms.swingAngle();
+		const homingTarget = homingTargetAtom();
+
+		if (swingPower > 1 && !homingTarget)
+			swingDirection = applyRandomYawSpread(swingDirection, GolfClubConfig.OVERCHARGE_SPREAD_ANGLE);
+
+		this.changeState(GolfClubState.Swing);
+
+		this.animationTracks.BackswingFull?.Stop();
+		this.animationTracks.BackswingPutt?.Stop();
+		this.animationTracks.Overcharge?.Stop();
+		if (swingAngle === 0 && swingPower <= 1) {
+			this.animationTracks.SwingPutt?.Play();
+		} else {
+			this.animationTracks.SwingFull?.Play();
+		}
+
+		Events.GolfClub.Swing.fire(swingDirection, swingPower, swingAngle, Workspace.GetServerTimeNow());
+
+		task.delay(GolfClubConfig.SWING_CONTACT_DELAY, () => {
+			const golfBall = golfBallAtom();
+			if (golfBall && GolfClubAtoms.isBallInRange()) {
+				golfBall.hit(swingDirection, swingPower, swingAngle, homingTarget);
+
+				Events.GolfClub.GolfBallHit.fire(
+					homingTarget,
+					golfBall.instance.GetPivot().Position,
+					Workspace.GetServerTimeNow(),
+				);
+			}
+		});
+
+		task.delay(GolfClubConfig.POST_SWING_LOCK_TIME, () => {
+			this.localCharacter.setWalkSpeedMultiplier(1);
+			this.meleeHitbox.HitStop();
+
+			this.changeState(GolfClubState.None);
+		});
+	}
+
+	private aim(toAim: boolean) {
+		if (toAim) {
+			if (this.state !== GolfClubState.None) return;
+
+			this.localCharacter.setWalkSpeedMultiplier(GolfClubConfig.AIM_WALK_SPEED_MULTIPLIER);
+
+			this.changeState(GolfClubState.Aim);
+		} else {
+			if (this.state !== GolfClubState.Aim) return;
+
+			this.localCharacter.setWalkSpeedMultiplier(1);
+
+			this.changeState(GolfClubState.None);
+		}
+	}
+
+	private adjustSwingAngle(value: unknown) {}
+
+	private setSwingAnglePreset(preset: number) {
+		if (!this.isActive) return;
+
+		GolfClubAtoms.swingAngle(GolfClubConfig.SWING_ANGLE_PRESETS[preset - 1]);
+	}
+
+	private activate() {
+		this.isActive = true;
+		GolfClubAtoms.isActive(true);
+
+		this.instance.Handle.Attach.Enabled = true;
+		this.localCharacter.instance.RightHand.ItemJoint.Enabled = false;
+
+		this.localCharacter.instance.Humanoid.LeftHandIKControl.Enabled = true;
+		this.localCharacter.instance.Humanoid.RightHandIKControl.Enabled = true;
+
+		this.cameraController.focusAim(this.localCharacter.instance, this.localCharacter.instance.Humanoid);
+
+		this.animationTracks.Ready?.Play();
+	}
+
+	private deactivate() {
+		this.isActive = false;
+		GolfClubAtoms.isActive(false);
+		GolfClubAtoms.isBallInRange(false);
+		GolfClubAtoms.swingPower(0);
+		GolfClubAtoms.isOvercharging(false);
+
+		this.instance.Handle.Attach.Enabled = false;
+		this.localCharacter.instance.RightHand.ItemJoint.Enabled = true;
+
+		this.localCharacter.instance.Humanoid.LeftHandIKControl.Enabled = false;
+		this.localCharacter.instance.Humanoid.RightHandIKControl.Enabled = false;
+
+		this.cameraController.unfocusAim();
+
+		this.animationTracks.Ready?.Stop();
+	}
+
+	private changeState(newState: GolfClubState) {
+		if (this.state === newState) return;
+
+		if (this.state === GolfClubState.None) {
+			this.activate();
+		} else if (newState === GolfClubState.None) {
+			this.deactivate();
+		}
+		this.state = newState;
+	}
+
+	private setupIKControls() {
+		this.computeAttachC1().andThen((c1) => (this.instance.Handle.Attach.C1 = c1));
+
+		this.instance.Handle.Attach.Part0 = this.localCharacter.instance.UpperTorso;
+		this.instance.Handle.Attach.Part1 = this.instance.Handle;
+
+		this.localCharacter.instance.Humanoid.LeftHandIKControl.Target = this.instance.Handle.LeftHandIKTarget;
+		this.localCharacter.instance.Humanoid.RightHandIKControl.Target = this.instance.Handle.RightHandIKTarget;
+	}
+
+	private setupMeleeHitbox() {
+		const meleeHitbox = new ShapecastHitbox(this.instance, this.localCharacter.getExcludeRaycastParams());
+		meleeHitbox
+			.BeforeStart(() => this.meleeTargetsHit.clear())
+			.OnHit((raycastResult) => this.onMeleeHitboxHit(raycastResult));
+		this.meleeHitbox = this.janitor.Add(meleeHitbox);
+	}
+
+	private async computeAttachC1(): Promise<CFrame> {
+		const readyAnimationId = this.instance.Animations.Ready.AnimationId;
+		const keyframeSequence = KeyframeSequenceProvider.GetKeyframeSequenceAsync(readyAnimationId);
+		const keyframe = keyframeSequence.GetKeyframes()[0];
+
+		const lowerTorsoPose = findPoseInKeyframe(keyframe, "LowerTorso");
+		const upperTorsoPose = findPoseInKeyframe(keyframe, "UpperTorso");
+		const handlePose = findPoseInKeyframe(keyframe, "Handle");
+
+		const rootTransform = lowerTorsoPose ? lowerTorsoPose.CFrame : new CFrame();
+		const waistTransform = upperTorsoPose ? upperTorsoPose.CFrame : new CFrame();
+		const attachTransform = handlePose ? handlePose.CFrame : new CFrame();
+
+		const rootJoint = this.localCharacter.instance.LowerTorso.Root;
+		const waistJoint = this.localCharacter.instance.UpperTorso.Waist;
+
+		const lowerTorsoLocal = rootJoint.C0.mul(rootTransform).mul(rootJoint.C1.Inverse());
+		const upperTorsoLocal = lowerTorsoLocal.mul(waistJoint.C0).mul(waistTransform).mul(waistJoint.C1.Inverse());
+
+		const hipHeight = this.localCharacter.instance.Humanoid.HipHeight;
+		const swingTargetOffset = GolfClubConfig.DEFAULT_SWING_TARGET_OFFSET.add(new Vector3(0, -hipHeight, 0));
+		this.swingTargetOffset = swingTargetOffset;
+
+		const targetHRPLocal = CFrame.lookAlong(swingTargetOffset, new Vector3(-1, 0, 0));
+
+		const delta = upperTorsoLocal.Position.sub(swingTargetOffset);
+		const run = math.sqrt(delta.X * delta.X + delta.Z * delta.Z);
+		const tiltAngle = math.atan2(delta.Y, run);
+
+		const clubheadLocal = new CFrame(this.instance.Handle.Clubhead.Position).mul(
+			CFrame.Angles(
+				math.rad(this.instance.Handle.Clubhead.Orientation.X),
+				math.rad(this.instance.Handle.Clubhead.Orientation.Y),
+				math.rad(90) + tiltAngle,
+			),
+		);
+
+		return clubheadLocal.mul(targetHRPLocal.Inverse()).mul(upperTorsoLocal).mul(attachTransform);
+	}
+
+	private onMeleeHitboxHit(raycastResult: RaycastResult) {
+		const character = raycastResult.Instance.Parent as Model | undefined;
+		const humanoid = character?.FindFirstChildOfClass("Humanoid");
+		if (character && humanoid && !this.meleeTargetsHit.has(character)) {
+			this.meleeTargetsHit.add(character);
+
+			if (character.FindFirstChildOfClass("ForceField")) return;
+
+			Events.GolfClub.MeleeTargetHit.fire(character, raycastResult.Position, Workspace.GetServerTimeNow());
+
+			if (humanoid.GetState() === Enum.HumanoidStateType.Ragdoll) return;
+			this.localCharacter.rush(GolfClubConfig.MELEE_KNOCKOUT_RUSH_DURATION);
+		}
+	}
+}
+
+export default GolfClubComponent;

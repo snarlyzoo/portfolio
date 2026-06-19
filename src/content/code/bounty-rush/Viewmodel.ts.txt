@@ -1,0 +1,130 @@
+import { config, createSpring, Spring } from "@rbxts/ripple";
+import { Players, RunService, StarterPlayer } from "@rbxts/services";
+import { ViewmodelConfig, ViewmodelSprings } from "shared/constants/characters";
+import { ViewmodelInstance } from "shared/types/characters";
+
+class Viewmodel {
+	static create(rootPart: BasePart, humanoid: Humanoid): Viewmodel {
+		return new Viewmodel(this.createViewmodelInstance(), rootPart, humanoid);
+	}
+
+	private static createViewmodelInstance(): ViewmodelInstance {
+		const viewmodel = Players.CreateHumanoidModelFromDescription(
+			Players.GetHumanoidDescriptionFromUserId(RunService.IsStudio() ? 107484074 : Players.LocalPlayer.UserId),
+			Enum.HumanoidRigType.R6,
+		);
+
+		const rootPart = viewmodel.FindFirstChild("HumanoidRootPart");
+		if (!rootPart || !rootPart.IsA("BasePart")) throw "HumanoidRootPart not found";
+
+		const humanoid = viewmodel.FindFirstChildOfClass("Humanoid");
+		if (!humanoid) throw "Humanoid not found";
+
+		const torso = viewmodel.FindFirstChild("Torso");
+		if (!torso || !torso.IsA("BasePart")) throw "Torso not found";
+
+		const leftArm = viewmodel.FindFirstChild("Left Arm");
+		if (!leftArm || !leftArm.IsA("BasePart")) throw "Left Arm not found";
+		const rightArm = viewmodel.FindFirstChild("Right Arm");
+		if (!rightArm || !rightArm.IsA("BasePart")) throw "Right Arm not found";
+
+		viewmodel.Name = "Viewmodel";
+
+		rootPart.Anchored = true;
+		viewmodel.PrimaryPart = rootPart;
+
+		humanoid.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None;
+		humanoid.EvaluateStateMachine = false;
+		humanoid.RequiresNeck = false;
+
+		for (const descendant of viewmodel.GetDescendants()) {
+			if (!(descendant.Name in ViewmodelConfig.VALID_DESCENDANTS)) {
+				descendant.Destroy();
+			} else if (descendant.IsA("BasePart")) {
+				descendant.CastShadow = false;
+				descendant.CollisionGroup = ViewmodelConfig.COLLISION_GROUP;
+				descendant.Massless = true;
+			}
+		}
+
+		torso.Transparency = 1;
+
+		leftArm.Size = ViewmodelConfig.ARM_SIZE;
+		rightArm.Size = ViewmodelConfig.ARM_SIZE;
+
+		const animator = new Instance("Animator");
+		animator.Parent = humanoid;
+
+		return viewmodel as ViewmodelInstance;
+	}
+
+	constructor(readonly instance: ViewmodelInstance, private readonly rootPart: BasePart, humanoid: Humanoid) {
+		humanoid.StateChanged.Connect((_, newState) => this.onHumanoidStateChanged(newState));
+	}
+
+	private prevCameraCFrame = new CFrame();
+
+	private jumpSpring: Spring<CFrame> = createSpring(new CFrame(), { start: true });
+	private moveSpring: Spring<CFrame> = createSpring(new CFrame(), { start: true });
+	private swaySpring: Spring<CFrame> = createSpring(new CFrame(), { ...config.gentle, start: true });
+
+	update(cameraCFrame: CFrame): void {
+		this.updateMoveMotion();
+		this.updateSwayMotion(cameraCFrame);
+
+		const motionOffset = this.jumpSpring
+			.getPosition()
+			.mul(this.moveSpring.getPosition())
+			.mul(this.swaySpring.getPosition());
+		const cameraOffset = cameraCFrame.UpVector.mul(ViewmodelConfig.CAMERA_OFFSET_Y);
+		this.instance.PivotTo(cameraCFrame.mul(motionOffset).add(cameraOffset));
+
+		this.prevCameraCFrame = cameraCFrame;
+	}
+
+	destroy(): void {
+		this.instance.Destroy();
+	}
+
+	private updateMoveMotion(): void {
+		let velocity = this.rootPart.AssemblyLinearVelocity;
+		velocity = new Vector3(velocity.X, 0, velocity.Z);
+
+		const walkSpeed = StarterPlayer.CharacterWalkSpeed;
+		const factor = math.clamp(velocity.Magnitude / walkSpeed, 0, 1);
+
+		const tick = os.clock();
+		const angleX = math.cos(tick * walkSpeed) * factor * ViewmodelSprings.MAX_MOVE_ANGLE;
+		const angleY = math.sin(tick * (walkSpeed / 2)) * factor * ViewmodelSprings.MAX_MOVE_ANGLE;
+
+		this.moveSpring.setGoal(CFrame.Angles(angleX, angleY, 0));
+	}
+
+	private updateSwayMotion(cameraCFrame: CFrame): void {
+		const delta = this.prevCameraCFrame.Inverse().mul(cameraCFrame);
+		const [deltaX, deltaY] = delta.ToEulerAnglesXYZ();
+
+		const angleX = math.clamp(
+			deltaX * ViewmodelSprings.CAMERA_SWAY_FACTOR,
+			-ViewmodelSprings.MAX_SWAY_ANGLE,
+			ViewmodelSprings.MAX_SWAY_ANGLE,
+		);
+		const angleY = math.clamp(
+			deltaY * ViewmodelSprings.CAMERA_SWAY_FACTOR,
+			-ViewmodelSprings.MAX_SWAY_ANGLE,
+			ViewmodelSprings.MAX_SWAY_ANGLE,
+		);
+
+		this.swaySpring.setGoal(CFrame.Angles(-angleX, -angleY, 0));
+	}
+
+	private onHumanoidStateChanged(newState: Enum.HumanoidStateType): void {
+		if (newState === Enum.HumanoidStateType.Landed) {
+			this.jumpSpring.setGoal(new CFrame(), config.stiff);
+		} else if (newState === Enum.HumanoidStateType.Freefall) {
+			this.jumpSpring.setGoal(CFrame.Angles(math.rad(7.5), 0, 0), config.slow);
+		}
+	}
+}
+
+export default Viewmodel;

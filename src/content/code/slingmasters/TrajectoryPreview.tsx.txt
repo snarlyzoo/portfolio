@@ -1,0 +1,178 @@
+import React, { Fragment, useEffect, useMemo, useRef } from "@rbxts/react";
+import { useAtom } from "@rbxts/react-charm";
+import { RunService, Workspace } from "@rbxts/services";
+import { trajectoryPreviewAtom } from "match/client/atoms";
+import {
+	TRAJECTORY_PREVIEW_DOT_COUNT,
+	TRAJECTORY_PREVIEW_DOT_INTERVAL,
+	TRAJECTORY_PREVIEW_DOT_MARCH_SPEED,
+} from "match/client/constants";
+import { PROJECTILE_STUDS_PER_SECOND } from "match/shared/constants";
+import { calculatePosition, calculateVelocity } from "match/shared/utils";
+
+interface ShotStatProps {
+	AnchorPoint?: Vector2;
+	Position?: UDim2;
+	Size?: UDim2;
+	value: string;
+	label: string;
+}
+
+const ShotStat = ({ AnchorPoint, Position, Size, value, label }: ShotStatProps): React.Element => {
+	return (
+		<frame AnchorPoint={AnchorPoint} BackgroundTransparency={1} Position={Position} Size={Size}>
+			<textlabel
+				AnchorPoint={new Vector2(0.5, 1)}
+				BackgroundTransparency={1}
+				Position={UDim2.fromScale(0.5, 0.75)}
+				Size={UDim2.fromScale(1, 0.75)}
+				Font={Enum.Font.DenkOne}
+				Text={value}
+				TextColor={new BrickColor("Bright violet")}
+				TextScaled={true}
+				TextYAlignment={Enum.TextYAlignment.Bottom}
+			/>
+			<textlabel
+				AnchorPoint={new Vector2(0.5, 0)}
+				BackgroundTransparency={1}
+				Position={UDim2.fromScale(0.5, 0.75)}
+				Size={UDim2.fromScale(1, 0.25)}
+				Font={Enum.Font.DenkOne}
+				Text={label}
+				TextColor={new BrickColor("Bright violet")}
+				TextScaled={true}
+				TextYAlignment={Enum.TextYAlignment.Top}
+			/>
+		</frame>
+	);
+};
+
+interface TrajectoryPreviewProps {
+	Adornee: PVInstance;
+}
+
+const TrajectoryPreview = ({ Adornee }: TrajectoryPreviewProps): React.Element => {
+	const trajectoryPreview = useAtom(trajectoryPreviewAtom);
+
+	const dotsRef = useRef<Map<number, SphereHandleAdornment>>(new Map());
+	const dotsPhaseRef = useRef(0);
+
+	const arcParams = useMemo(() => {
+		if (!trajectoryPreview) return undefined;
+		const { angle, power } = trajectoryPreview;
+
+		const dotCount = math.max(4, math.floor(power * TRAJECTORY_PREVIEW_DOT_COUNT));
+
+		const cframe = Adornee.GetPivot();
+		const origin = cframe.Position;
+		const forward = cframe.LookVector;
+		const right = forward.Cross(Vector3.yAxis).Unit;
+		const up = right.Cross(forward).Unit;
+
+		const speed = power * PROJECTILE_STUDS_PER_SECOND;
+
+		const velocity = forward.mul(math.cos(angle) * speed).add(up.mul(math.sin(angle) * speed));
+		const acceleration = new Vector3(0, -Workspace.Gravity, 0);
+
+		const positions: Vector3[] = [];
+		for (let i = 0; i < dotCount; i++)
+			positions.push(calculatePosition(origin, velocity, acceleration, i * TRAJECTORY_PREVIEW_DOT_INTERVAL));
+
+		const tLast = (dotCount - 1) * TRAJECTORY_PREVIEW_DOT_INTERVAL;
+		const tailVelocity = calculateVelocity(velocity, acceleration, tLast);
+
+		return { dotCount, positions, tailVelocity };
+	}, [Adornee, trajectoryPreview]);
+
+	useEffect(() => {
+		if (!arcParams) return;
+		const { dotCount, positions, tailVelocity } = arcParams;
+
+		const connection = RunService.Heartbeat.Connect((deltaTime) => {
+			dotsPhaseRef.current = (dotsPhaseRef.current + deltaTime * TRAJECTORY_PREVIEW_DOT_MARCH_SPEED) % dotCount;
+			const phase = dotsPhaseRef.current;
+
+			dotsRef.current.forEach((adornment, index) => {
+				const floatIndex = (index + phase) % dotCount;
+				const lowerIndex = math.floor(floatIndex);
+				const upperIndex = math.min(lowerIndex + 1, dotCount - 1);
+				const alpha = floatIndex - lowerIndex;
+				let position: Vector3;
+				if (lowerIndex === dotCount - 1) {
+					position = positions[dotCount - 1].add(tailVelocity.mul(alpha * TRAJECTORY_PREVIEW_DOT_INTERVAL));
+				} else {
+					position = positions[lowerIndex].Lerp(positions[upperIndex], alpha);
+				}
+				adornment.CFrame = new CFrame(position);
+
+				const t = floatIndex / dotCount;
+				const tCurved = t * t;
+				adornment.Transparency = 0.5 + 0.5 * tCurved;
+				adornment.Radius = 0.25 * (1 - tCurved) + 0.1 * tCurved;
+			});
+		});
+		return () => connection.Disconnect();
+	}, [arcParams]);
+
+	if (!trajectoryPreview || !arcParams) return <Fragment />;
+	const { angle, power } = trajectoryPreview;
+
+	return (
+		<Fragment>
+			<billboardgui
+				Adornee={Adornee}
+				AlwaysOnTop={true}
+				Size={UDim2.fromScale(12, 4)}
+				StudsOffset={new Vector3(-3, 6, 0)}
+			>
+				<frame
+					AnchorPoint={new Vector2(0.5, 0.5)}
+					BackgroundColor3={new Color3(1, 1, 1)}
+					BorderSizePixel={0}
+					Position={UDim2.fromScale(0.5, 0.5)}
+					Size={UDim2.fromScale(1, 1)}
+				>
+					<ShotStat
+						AnchorPoint={new Vector2(0.5, 0.5)}
+						Size={UDim2.fromScale(0.5, 0.9)}
+						value={`${math.round(power * 100)}%`}
+						label="POWER"
+					/>
+					<ShotStat
+						AnchorPoint={new Vector2(0.5, 0.5)}
+						Size={UDim2.fromScale(0.5, 0.9)}
+						value={`${math.round(math.deg(angle))}°`}
+						label="ANGLE"
+					/>
+
+					<uicorner CornerRadius={new UDim(0.5, 0)} />
+					<uilistlayout
+						Padding={new UDim(0.1, 0)}
+						FillDirection={Enum.FillDirection.Horizontal}
+						HorizontalAlignment={Enum.HorizontalAlignment.Center}
+						VerticalAlignment={Enum.VerticalAlignment.Center}
+					/>
+					<uipadding PaddingLeft={new UDim(0.1, 0)} PaddingRight={new UDim(0.1, 0)} />
+				</frame>
+			</billboardgui>
+
+			{arcParams.positions.map((_, index) => (
+				<spherehandleadornment
+					key={index}
+					ref={(instance) => {
+						if (instance) {
+							dotsRef.current.set(index, instance);
+						} else {
+							dotsRef.current.delete(index);
+						}
+					}}
+					Color3={new Color3(1, 1, 1)}
+					Adornee={Workspace.Terrain}
+					Shading={Enum.AdornShading.AlwaysOnTop}
+				/>
+			))}
+		</Fragment>
+	);
+};
+
+export default TrajectoryPreview;

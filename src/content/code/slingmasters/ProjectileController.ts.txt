@@ -1,0 +1,129 @@
+import { Controller, OnRender, OnTick } from "@flamework/core";
+import { Workspace } from "@rbxts/services";
+import { PROJECTILE_LIFETIME, PROJECTILE_SPHERECAST_RADIUS } from "match/shared/constants";
+import { Projectile } from "match/shared/types";
+import { computeProjectileState } from "match/shared/utils";
+
+interface ClientProjectile extends Projectile {
+	position: Vector3;
+	velocity: Vector3;
+	pvInstance: PVInstance;
+}
+
+@Controller()
+class ProjectileController implements OnRender {
+	private projectiles = new Map<string, ClientProjectile>();
+
+	onRender(dt: number) {
+		for (const [id, projectile] of this.projectiles) {
+			const { position, velocity } = computeProjectileState(
+				projectile.origin,
+				projectile.forward,
+				projectile.angle,
+				projectile.power,
+				projectile.t,
+			);
+
+			const raycastResult = Workspace.Spherecast(
+				position,
+				PROJECTILE_SPHERECAST_RADIUS,
+				velocity.mul(dt),
+				projectile.raycastParams,
+			);
+			if (raycastResult) {
+				projectile.pvInstance.Destroy();
+				this.projectiles.delete(id);
+			}
+
+			if (projectile.t >= PROJECTILE_LIFETIME) {
+				projectile.pvInstance.Destroy();
+				this.projectiles.delete(id);
+			}
+
+			projectile.pvInstance.PivotTo(CFrame.lookAlong(position, velocity));
+
+			projectile.position = position;
+			projectile.velocity = velocity;
+			projectile.t += dt;
+		}
+	}
+
+	fireProjectile(
+		origin: Vector3,
+		forward: Vector3,
+		angle: number,
+		power: number,
+		raycastParams: RaycastParams,
+	): void {
+		const pvInstance = this.createProjectileVisual();
+		this.projectiles.set("__local", {
+			origin,
+			forward,
+			angle,
+			power,
+			t: 0,
+			raycastParams,
+			position: origin,
+			velocity: new Vector3(),
+			pvInstance,
+		});
+	}
+
+	simulateProjectile(
+		id: string,
+		origin: Vector3,
+		forward: Vector3,
+		angle: number,
+		power: number,
+		raycastParams: RaycastParams,
+		startT = 0,
+	): void {
+		this.projectiles.set(id, {
+			origin,
+			forward,
+			angle,
+			power,
+			t: startT,
+			raycastParams,
+			position: origin,
+			velocity: new Vector3(),
+			pvInstance: this.createProjectileVisual(),
+		});
+	}
+
+	remapLocalProjectile(realId: string): void {
+		const projectile = this.projectiles.get("__local");
+		if (!projectile) return;
+
+		this.projectiles.delete("__local");
+		this.projectiles.set(realId, projectile);
+	}
+
+	destroyProjectile(id: string): void {
+		const projectile = this.projectiles.get(id);
+		if (!projectile) return;
+
+		projectile.pvInstance.Destroy();
+		this.projectiles.delete(id);
+	}
+
+	getProjectile(id: string): ClientProjectile | undefined {
+		return this.projectiles.get(id);
+	}
+
+	private createProjectileVisual(): PVInstance {
+		// TODO: Replace with dynamic projectile visuals
+
+		const part = new Instance("Part");
+		part.CastShadow = false;
+		part.CanCollide = false;
+		part.CanQuery = false;
+		part.CanTouch = false;
+		part.AudioCanCollide = false;
+		part.Anchored = true;
+		part.Parent = Workspace;
+		return part;
+	}
+}
+
+export default ProjectileController;

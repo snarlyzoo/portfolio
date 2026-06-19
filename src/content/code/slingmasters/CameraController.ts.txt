@@ -1,0 +1,87 @@
+import { subscribe } from "@rbxts/charm";
+import { Controller, OnRender, OnStart } from "@flamework/core";
+import { TweenService, Workspace } from "@rbxts/services";
+import { trajectoryPreviewAtom } from "match/client/atoms";
+import { CAMERA_FIELD_OF_VIEW, CAMERA_VIEW_DISTANCE } from "match/client/constants";
+import ProjectileController from "./ProjectileController";
+
+@Controller()
+class CameraController implements OnStart, OnRender {
+	readonly instance = new Instance("Camera");
+
+	constructor(private readonly projectileController: ProjectileController) {}
+
+	private viewOffset = new Vector3(0, 0, -CAMERA_VIEW_DISTANCE);
+
+	private trackingProjectileId: string | undefined = undefined;
+
+	onStart() {
+		this.instance.CameraType = Enum.CameraType.Scriptable;
+		this.instance.FieldOfView = CAMERA_FIELD_OF_VIEW;
+		this.instance.Parent = Workspace;
+
+		Workspace.CurrentCamera = this.instance;
+
+		subscribe(trajectoryPreviewAtom, (trajectoryPreview) => {
+			if (trajectoryPreview) {
+				this.instance.FieldOfView = CAMERA_FIELD_OF_VIEW * (1 + trajectoryPreview.power * 0.5);
+			} else {
+				TweenService.Create(this.instance, new TweenInfo(0.1), { FieldOfView: CAMERA_FIELD_OF_VIEW }).Play();
+			}
+		});
+	}
+
+	onRender() {
+		if (this.trackingProjectileId !== undefined) {
+			const projectile = this.projectileController.getProjectile(this.trackingProjectileId);
+			if (!projectile) return;
+
+			this.instance.CFrame = CFrame.lookAt(projectile.position.add(this.viewOffset), projectile.position);
+		}
+	}
+
+	playFirstTurnTransition(activePlayerPosition: Vector3, otherPlayerPosition: Vector3): Promise<void> {
+		return new Promise<void>((resolve, _, onCancel) => {
+			this.instance.CFrame = CFrame.lookAt(otherPlayerPosition.add(this.viewOffset.mul(2)), otherPlayerPosition);
+
+			const tween = TweenService.Create(this.instance, new TweenInfo(1.5), {
+				CFrame: CFrame.lookAt(otherPlayerPosition.add(this.viewOffset), otherPlayerPosition),
+			});
+			tween.Play();
+			Promise.fromEvent(tween.Completed).andThen(() => resolve());
+			onCancel(() => tween.Cancel());
+		}).andThen(() => this.playTurnTransition(activePlayerPosition));
+	}
+
+	playTurnTransition(playerPosition: Vector3): Promise<void> {
+		return new Promise((resolve, _, onCancel) => {
+			const tween = TweenService.Create(this.instance, new TweenInfo(1), {
+				CFrame: CFrame.lookAt(playerPosition.add(this.viewOffset), playerPosition),
+			});
+			tween.Play();
+			Promise.fromEvent(tween.Completed).andThen(() => resolve());
+			onCancel(() => tween.Cancel());
+		});
+	}
+
+	playHoldOnTarget(targetPosition: Vector3): Promise<void> {
+		return new Promise((resolve, _, onCancel) => {
+			const tween = TweenService.Create(this.instance, new TweenInfo(2), {
+				CFrame: CFrame.lookAt(targetPosition.add(this.viewOffset.mul(0.5)), targetPosition),
+			});
+			tween.Play();
+			Promise.fromEvent(tween.Completed).andThen(() => resolve());
+			onCancel(() => tween.Cancel());
+		});
+	}
+
+	setViewOffset(isLocalPlayerPlayer1: boolean) {
+		this.viewOffset = new Vector3(0, 0, isLocalPlayerPlayer1 ? -CAMERA_VIEW_DISTANCE : CAMERA_VIEW_DISTANCE);
+	}
+
+	setTrackingProjectile(projectileId: string | undefined) {
+		this.trackingProjectileId = projectileId;
+	}
+}
+
+export default CameraController;

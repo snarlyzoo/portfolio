@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+@theme {
+  /* Studio Bold / Deep Teal */
+  --color-canvas: #f2faf9;
+  --color-canvas-soft: #e8f5f3;
+  --color-ink: #0a2b2a;
+  --color-ink-soft: #45605f;
+  --color-ink-faint: #6f8584;
+  --color-teal: #12aeb0;
+  --color-teal-deep: #0a3f3e;
+  --color-teal-bright: #1ecbcc;
+  --color-line: #d3e6e3;
+  --color-line-soft: #e4f0ee;
+
+  --font-display: var(--font-sora);
+  --font-sans: var(--font-inter);
+  --font-mono: var(--font-geist-mono);
+
+  --radius-card: 18px;
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  font-family: var(--font-display), system-ui, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+::selection {
+  background: var(--color-teal-bright);
+  color: var(--color-teal-deep);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-teal);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Scroll-reveal. Server + first client render = no opacity rule (visible),
+   so there's no hydration mismatch and no-JS always shows content. The
+   client component adds reveal-hidden (off-screen) then reveal-shown. */
+.reveal {
+  transition:
+    opacity 0.6s ease,
+    transform 0.6s var(--ease-spring);
+}
+.reveal-hidden {
+  opacity: 0;
+  transform: translateY(18px);
+}
+.reveal-shown {
+  opacity: 1;
+  transform: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .reveal,
+  .reveal-hidden,
+  .reveal-shown {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+}
+
+/* Shiki output: take over background/padding from the theme wrapper. */
+.shiki-host pre.shiki {
+  margin: 0;
+  padding: 16px 18px;
+  background: #fff !important;
+  font-family: var(--font-mono), ui-monospace, monospace;
+  tab-size: 2;
+}
+.shiki-host code {
+  font-family: inherit;
+}
+.shiki-host pre.shiki .line {
+  min-height: 1em;
+}

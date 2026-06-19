@@ -1,0 +1,42 @@
+import { Physics, Sliding, Speeds } from "shared/constants/movement";
+import { MovementStateType } from "shared/types/movement";
+import MovementState from "./MovementState";
+
+class SlidingState extends MovementState {
+	readonly stateType = MovementStateType.Sliding;
+
+	enter(prevStateType: MovementStateType) {
+		this.context.controllerManager.MovingDirection = Vector3.zero;
+
+		this.context.groundController.Friction = Sliding.FRICTION;
+
+		if (prevStateType !== MovementStateType.Landed) this.context.configCollisionPartForState(this.stateType);
+
+		this.context.humanoid.ChangeState(Enum.HumanoidStateType.Running);
+
+		this.context.updateLastSlideTick();
+
+		return undefined;
+	}
+
+	update() {
+		if (this.context.performGroundCheck()) {
+			if (!this.context.isOnSteepSlope() && this.context.isBelowSpeed(Speeds.WALKING))
+				return MovementStateType.Crouched;
+			return undefined;
+		}
+		return MovementStateType.CrouchFall;
+	}
+
+	override exit() {
+		if (!this.context.hasCompletedSlide()) return false;
+
+		this.context.groundController.Friction = Physics.DEFAULT_FRICTION;
+
+		this.context.configCollisionPartForState();
+
+		return true;
+	}
+}
+
+export default SlidingState;

@@ -1,0 +1,175 @@
+import { Controller, OnStart } from "@flamework/core";
+import { RunService, Workspace } from "@rbxts/services";
+import { FirearmComponent } from "shared/components/weapons/firearms";
+import { WeaponVFXConfig } from "shared/constants/weapons";
+import { FirearmVFX } from "shared/types/weapons";
+
+type QueueItem = {
+	beam: Beam;
+	attachments: Attachment[];
+	expiryTime: number;
+};
+
+@Controller()
+class WeaponVFXManager implements OnStart {
+	private folder = new Instance("Folder");
+
+	private availableAttachments: Attachment[] = [];
+	private activeAttachments = new Set<Attachment>();
+	private metrics = {
+		totalCreated: 0,
+		peakActive: 0,
+		currentActive: 0,
+		poolSize: 0,
+	};
+
+	private destructionQueue: QueueItem[] = [];
+
+	private firearmVFXCache = new Map<FirearmComponent, FirearmVFX>();
+
+	onStart(): void {
+		this.folder.Name = "WEAPON_VISUAL_EFFECTS";
+		this.folder.Parent = Workspace;
+
+		this.growPool(WeaponVFXConfig.Pool.INITIAL_SIZE);
+
+		task.spawn(() => {
+			while (true) {
+				task.wait(WeaponVFXConfig.Pool.SHRINK_INTERVAL);
+				this.maybeShrinkPool();
+			}
+		});
+
+		RunService.Heartbeat.Connect(() => this.processDestructionQueue());
+	}
+
+	renderBeam(startPosition: Vector3, endPosition: Vector3, beamPrefab: Beam, lifetime: number = 0.01): void {
+		const attachment0 = this.acquire();
+		attachment0.Position = startPosition;
+
+		const attachment1 = this.acquire();
+		attachment1.Position = endPosition;
+
+		const beam = beamPrefab.Clone();
+		beam.Attachment0 = attachment0;
+		beam.Attachment1 = attachment1;
+		beam.Parent = this.folder;
+
+		this.destructionQueue.push({
+			beam: beam,
+			attachments: [attachment0, attachment1],
+			expiryTime: os.clock() + lifetime,
+		});
+	}
+
+	renderFirearmVFX(firearm: FirearmComponent): void {
+		let weaponVFX = this.firearmVFXCache.get(firearm);
+		if (!weaponVFX) {
+			weaponVFX = {};
+			for (const child of firearm.instance.Handle.Barrel.GetChildren() as ParticleEmitter[]) {
+				weaponVFX[child.Name as keyof FirearmVFX] = child;
+			}
+			this.firearmVFXCache.set(firearm, weaponVFX);
+			firearm.instance.Destroying.Connect(() => this.firearmVFXCache.delete(firearm));
+		}
+
+		weaponVFX.MuzzleFlash?.Emit(1);
+		weaponVFX.Smoke?.Emit(5);
+	}
+
+	private growPool(amount: number): void {
+		const cappedAmount = math.min(amount, WeaponVFXConfig.Pool.MAX_SIZE - this.availableAttachments.size());
+		for (let i = 0; i < cappedAmount; i++) {
+			this.availableAttachments.push(this.createAttachment());
+		}
+
+		this.metrics.poolSize = this.availableAttachments.size();
+
+		if (cappedAmount > 0) {
+			print(`Pool grew by ${cappedAmount} (now ${this.metrics.poolSize})`);
+		} else {
+			warn("Pool at maximum size, cannot grow further");
+		}
+	}
+
+	private maybeShrinkPool(): void {
+		const available = this.availableAttachments.size();
+		const active = this.activeAttachments.size();
+		const usageRatio = active / (available + active);
+
+		if (usageRatio < WeaponVFXConfig.Pool.SHRINK_THRESHOLD && available > WeaponVFXConfig.Pool.INITIAL_SIZE) {
+			const targetSize = math.max(
+				WeaponVFXConfig.Pool.INITIAL_SIZE,
+				math.ceil(this.metrics.peakActive * (1 + WeaponVFXConfig.Pool.SHRINK_PEAK_BUFFER)),
+			);
+
+			const toRemove = available - targetSize;
+			if (toRemove > 0) {
+				for (let i = 0; i < toRemove; i++) {
+					this.availableAttachments.pop()?.Destroy();
+				}
+				this.metrics.poolSize = this.availableAttachments.size();
+
+				print(`Pool shrunk by ${toRemove} (now ${this.metrics.poolSize})`);
+			}
+
+			this.metrics.peakActive = this.metrics.currentActive;
+		}
+	}
+
+	private createAttachment(): Attachment {
+		const attachment = new Instance("Attachment");
+		attachment.Parent = this.folder;
+		this.metrics.totalCreated++;
+		return attachment;
+	}
+
+	private acquire(): Attachment {
+		let attachment = this.availableAttachments.pop();
+		if (!attachment) {
+			const available = this.availableAttachments.size();
+			const growthAmount = math.max(1, math.ceil(available * (WeaponVFXConfig.Pool.GROWTH_FACTOR - 1)));
+
+			this.growPool(growthAmount);
+			attachment = this.availableAttachments.pop();
+
+			if (!attachment) {
+				warn("Pool exhausted, creating overflow attachment");
+				attachment = this.createAttachment();
+			}
+		}
+
+		this.activeAttachments.add(attachment);
+		this.metrics.currentActive = this.activeAttachments.size();
+		this.metrics.peakActive = math.max(this.metrics.peakActive, this.metrics.currentActive);
+
+		return attachment;
+	}
+
+	private release(attachment: Attachment): void {
+		this.activeAttachments.delete(attachment);
+
+		if (this.availableAttachments.size() >= WeaponVFXConfig.Pool.MAX_SIZE) {
+			attachment.Destroy();
+		} else {
+			this.availableAttachments.push(attachment);
+		}
+
+		this.metrics.currentActive = this.activeAttachments.size();
+	}
+
+	private processDestructionQueue(): void {
+		const now = os.clock();
+		for (let i = this.destructionQueue.size() - 1; i >= 0; i--) {
+			const item = this.destructionQueue[i];
+
+			if (now >= item.expiryTime) {
+				item.beam.Destroy();
+				item.attachments.forEach((attachment) => this.release(attachment));
+				this.destructionQueue.remove(i);
+			}
+		}
+	}
+}
+
+export default WeaponVFXManager;

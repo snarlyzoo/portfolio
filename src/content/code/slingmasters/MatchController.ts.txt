@@ -1,0 +1,163 @@
+import { Controller, OnStart } from "@flamework/core";
+import { Players, RunService, StarterGui, TeleportService, Workspace } from "@rbxts/services";
+import { activePlayerAtom, matchPlayersAtom, matchStateTypeAtom } from "match/client/atoms";
+import { Events } from "match/client/network";
+import { MatchBotInstance, MatchStateType } from "match/shared/types";
+import CameraController from "./CameraController";
+import ShotInputController from "./ShotInputController";
+import ProjectileController from "./ProjectileController";
+
+@Controller()
+class MatchController implements OnStart {
+	constructor(
+		private readonly cameraController: CameraController,
+		private readonly shotInputController: ShotInputController,
+		private readonly projectileController: ProjectileController,
+	) {}
+
+	private isFirstTurn = true;
+
+	onStart() {
+		this.configCoreGui();
+
+		try {
+			this.reportMatchId();
+		} catch (err) {
+			warn(`Failed to report match ID: ${err}`);
+		}
+
+		Events.MatchStarted.connect((player1, player2) => this.onMatchStarted(player1, player2));
+		Events.TurnStarted.connect((player) => this.onTurnStarted(player));
+
+		Events.ProjectileFired.connect((...args) => this.onProjectileFired(...args));
+		Events.ProjectileLanded.connect((projectileId, hitPlayer) => this.onProjectileLanded(projectileId, hitPlayer));
+	}
+
+	private reportMatchId() {
+		const raw = TeleportService.GetLocalPlayerTeleportData() as { matchId: string } | undefined;
+		if (raw?.matchId !== undefined) {
+			Events.ReportMatchId(raw.matchId);
+		} else if (RunService.IsStudio()) {
+			print("Running in Studio, using mock match ID");
+			Events.ReportMatchId("123456789");
+		} else {
+			throw "No matchId found in teleport data";
+		}
+	}
+
+	private configCoreGui() {
+		StarterGui.SetCoreGuiEnabled(Enum.CoreGuiType.Backpack, false);
+		StarterGui.SetCoreGuiEnabled(Enum.CoreGuiType.Health, false);
+
+		const disableResetButton = () => {
+			const [success] = pcall(() => StarterGui.SetCore("ResetButtonCallback", false));
+			if (!success) task.delay(1, disableResetButton);
+		};
+		disableResetButton();
+	}
+
+	private onMatchStarted(player1: Player, player2: Player | MatchBotInstance) {
+		matchPlayersAtom({ player1, player2 });
+		matchStateTypeAtom(MatchStateType.Countdown);
+	}
+
+	private async onTurnStarted(player: Player | MatchBotInstance) {
+		try {
+			const matchStateType = matchStateTypeAtom();
+			if (matchStateType === MatchStateType.Countdown) {
+				matchStateTypeAtom(MatchStateType.InProgress);
+			} else if (matchStateType !== MatchStateType.InProgress) {
+				throw "Match is not in a valid state for a turn to start";
+			}
+
+			const matchPlayers = matchPlayersAtom();
+			if (!matchPlayers) throw "Match players not found";
+
+			const { player1, player2 } = matchPlayers;
+			const [activePlayer, otherPlayer] =
+				player.UserId === player1.UserId ? [player1, player2] : [player2, player1];
+
+			activePlayerAtom(activePlayer);
+
+			const activePlayerCharacter = activePlayer.Character;
+			assert(activePlayerCharacter, `Character not found for ${activePlayer.Name}`);
+
+			const otherPlayerCharacter = otherPlayer.Character;
+			assert(otherPlayerCharacter, `Character not found for ${otherPlayer.Name}`);
+
+			this.cameraController.setViewOffset(player1 === Players.LocalPlayer);
+
+			const activePlayerPosition = activePlayerCharacter.GetPivot().Position;
+			if (this.isFirstTurn) {
+				await this.cameraController.playFirstTurnTransition(
+					activePlayerPosition,
+					otherPlayerCharacter.GetPivot().Position,
+				);
+			} else {
+				await this.cameraController.playTurnTransition(activePlayerPosition);
+			}
+			this.isFirstTurn = false;
+
+			if (activePlayer === Players.LocalPlayer) {
+				const { angle, power } = await this.shotInputController.getShotInput();
+
+				const raycastParams = new RaycastParams();
+				raycastParams.FilterDescendantsInstances = [activePlayerCharacter];
+				raycastParams.FilterType = Enum.RaycastFilterType.Exclude;
+
+				const pivot = activePlayerCharacter.GetPivot();
+				this.projectileController.fireProjectile(pivot.Position, pivot.LookVector, angle, power, raycastParams);
+
+				Events.RequestShot(angle, power);
+			}
+		} catch (err) {
+			warn(`Failed to play turn: ${err}`);
+		}
+	}
+
+	private onProjectileFired(
+		player: Player | MatchBotInstance,
+		projectileId: string,
+		origin: Vector3,
+		forward: Vector3,
+		angle: number,
+		power: number,
+		timestamp: number,
+	) {
+		if (player === Players.LocalPlayer) {
+			this.projectileController.remapLocalProjectile(projectileId);
+		} else {
+			const raycastParams = new RaycastParams();
+			raycastParams.FilterDescendantsInstances = player.Character ? [player.Character] : [];
+			raycastParams.FilterType = Enum.RaycastFilterType.Exclude;
+
+			const startT = Workspace.GetServerTimeNow() - timestamp;
+
+			this.projectileController.simulateProjectile(
+				projectileId,
+				origin,
+				forward,
+				angle,
+				power,
+				raycastParams,
+				startT,
+			);
+		}
+
+		this.cameraController.setTrackingProjectile(projectileId);
+	}
+
+	private onProjectileLanded(projectileId: string, hitPlayer: Player | MatchBotInstance | undefined) {
+		this.projectileController.destroyProjectile(projectileId);
+		this.cameraController.setTrackingProjectile(undefined);
+
+		if (hitPlayer) {
+			const character = hitPlayer.Character;
+			if (!character) return;
+
+			this.cameraController.playHoldOnTarget(character.GetPivot().Position);
+		}
+	}
+}
+
+export default MatchController;

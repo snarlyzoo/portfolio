@@ -1,0 +1,116 @@
+import { Controller, OnStart } from "@flamework/core";
+import { UserInputService } from "@rbxts/services";
+import { trajectoryPreviewAtom } from "match/client/atoms";
+import { MAX_SHOT_DRAG_SCALE, MIN_SHOT_DRAG_DISTANCE } from "match/client/constants";
+import CameraController from "./CameraController";
+
+@Controller()
+class ShotInputController implements OnStart {
+	constructor(private readonly cameraController: CameraController) {}
+
+	onStart() {}
+
+	getShotInput(): Promise<{ angle: number; power: number }> {
+		return new Promise((resolve, _, onCancel) => {
+			const inputConnections: RBXScriptConnection[] = [];
+			const clearInputConnections = () => {
+				inputConnections.forEach((connection) => connection.Disconnect());
+				inputConnections.clear();
+			};
+
+			const cleanup = () => {
+				trajectoryPreviewAtom(undefined);
+				clearInputConnections();
+				prefferedInputConnection.Disconnect();
+			};
+
+			const setupGamepadInput = () => {
+				// TODO: Implement gamepad input handling
+			};
+
+			const setupMouseInput = () => {
+				let startPosition: Vector3 | undefined;
+				const startConn = UserInputService.InputBegan.Connect((input, processed) => {
+					if (processed || input.UserInputType !== Enum.UserInputType.MouseButton1) return;
+					startPosition = input.Position;
+				});
+				const moveConn = UserInputService.InputChanged.Connect((input, processed) => {
+					if (processed || input.UserInputType !== Enum.UserInputType.MouseMovement || !startPosition) return;
+					trajectoryPreviewAtom(this.calculateShot(startPosition, input.Position));
+				});
+				const endConn = UserInputService.InputEnded.Connect((input, processed) => {
+					if (processed || input.UserInputType !== Enum.UserInputType.MouseButton1 || !startPosition) return;
+
+					const { angle, power } = this.calculateShot(startPosition, input.Position);
+					if (power > 0) {
+						resolve({ angle, power });
+						cleanup();
+					}
+				});
+				inputConnections.push(startConn, moveConn, endConn);
+			};
+
+			const setupTouchInput = () => {
+				let touchStarted = false;
+				const startConn = UserInputService.TouchStarted.Connect((touch, processed) => {
+					if (processed || touchStarted) return;
+					touchStarted = true;
+
+					const startPosition = touch.Position;
+					const moveConn = UserInputService.TouchMoved.Connect((moveTouch, moveProcessed) => {
+						if (moveProcessed || moveTouch !== touch) return;
+						trajectoryPreviewAtom(this.calculateShot(startPosition, moveTouch.Position));
+					});
+					const endConn = UserInputService.TouchEnded.Connect((endTouch, endProcessed) => {
+						if (endProcessed || endTouch !== touch) return;
+
+						const { angle, power } = this.calculateShot(startPosition, endTouch.Position);
+						if (power > 0) {
+							resolve({ angle, power });
+							cleanup();
+						}
+					});
+					inputConnections.push(moveConn, endConn);
+				});
+				inputConnections.push(startConn);
+			};
+
+			const setupInputHandlers = () => {
+				trajectoryPreviewAtom(undefined);
+				clearInputConnections();
+
+				switch (UserInputService.PreferredInput) {
+					case Enum.PreferredInput.Gamepad:
+						setupGamepadInput();
+						break;
+					case Enum.PreferredInput.KeyboardAndMouse:
+						setupMouseInput();
+						break;
+					case Enum.PreferredInput.Touch:
+						setupTouchInput();
+						break;
+				}
+			};
+			const prefferedInputConnection =
+				UserInputService.GetPropertyChangedSignal("PreferredInput").Connect(setupInputHandlers);
+			setupInputHandlers();
+
+			onCancel(cleanup);
+		});
+	}
+
+	private calculateShot(startPosition: Vector3, endPosition: Vector3): { angle: number; power: number } {
+		const delta = endPosition.sub(startPosition);
+		if (delta.Magnitude < MIN_SHOT_DRAG_DISTANCE) return { angle: 0, power: 0 };
+		return {
+			angle: math.atan2(delta.Y, -delta.X),
+			power: math.min(delta.Magnitude / this.calculateMaxDragDistance(), 1),
+		};
+	}
+
+	private calculateMaxDragDistance(): number {
+		return this.cameraController.instance.ViewportSize.X * MAX_SHOT_DRAG_SCALE;
+	}
+}
+
+export default ShotInputController;

@@ -1,0 +1,54 @@
+import { Component } from "@flamework/components";
+import { Workspace } from "@rbxts/services";
+import { homingTargetAtom } from "client/atoms";
+import CameraController from "client/controllers/CameraController";
+import CharacterController from "client/controllers/CharacterController";
+import HomingController from "client/controllers/HomingController";
+import InputController from "client/controllers/InputController";
+import { Events } from "client/network";
+import { RocketLauncherConfig } from "shared/constants";
+import { ItemType } from "shared/types";
+import WeaponItemComponent from "./WeaponItemComponent";
+
+@Component({ tag: "RocketLauncher" })
+class RocketLauncherComponent extends WeaponItemComponent {
+	readonly itemType = ItemType.RocketLauncher;
+
+	constructor(
+		characterController: CharacterController,
+		inputController: InputController,
+		private cameraController: CameraController,
+		private homingController: HomingController,
+	) {
+		super(characterController, inputController);
+	}
+
+	override equip() {
+		super.equip();
+
+		this.homingController.enable({
+			coneHalfAngle: RocketLauncherConfig.HOMING_CONE_HALF_ANGLE,
+			maxRange: RocketLauncherConfig.HOMING_CONE_MAX_RANGE,
+		});
+	}
+
+	override unequip() {
+		super.unequip();
+
+		this.homingController.disable();
+	}
+
+	protected primaryAction(toActivate: boolean) {
+		if (!toActivate || !this.isEquipped) return;
+
+		Events.RocketLauncher.FireRocket(
+			this.cameraController.getCamera().CFrame.LookVector,
+			homingTargetAtom(),
+			Workspace.GetServerTimeNow(),
+		);
+
+		task.defer(() => this.localCharacter.removeItem(this));
+	}
+}
+
+export default RocketLauncherComponent;
